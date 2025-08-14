@@ -9,65 +9,69 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
-type Job struct {
-	ID int
-}
-
-var JobQueue = make(chan Job, 100)
-
+var openConnections int32
 var completedRequests int32
 var sentRequests int32
 
-func createTCPConn(addr string) (net.Conn, error) {
+func createTCPConn(localIP, remoteAddr string) (net.Conn, error) {
+	localAddr, _ := net.ResolveTCPAddr("tcp", localIP+":0")
 	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			return c.Control(func(fd uintptr) {
-				err := syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-				if err != nil {
-					log.Printf("Error setting SO_REUSEADDR: %v", err)
-				}
-			})
-		},
+		LocalAddr: localAddr,
+		// Control: func(network, address string, c syscall.RawConn) error {
+		// 	return c.Control(func(fd uintptr) {
+		// 		err := syscall.SetsockoptInt(syscall.Handle(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+		// 		if err != nil {
+		// 			log.Printf("Error setting SO_REUSEADDR: %v", err)
+		// 		}
+		// 	})
+		// },
 	}
-	return dialer.Dial("tcp", addr)
+	return dialer.Dial("tcp", remoteAddr)
 }
 
-func StartWorkerPool(num int, wg *sync.WaitGroup) {
+func startPersistentConnections(localIP string, num int, wg *sync.WaitGroup, stopCh <-chan struct{}) {
 	for i := 0; i < num; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			for job := range JobQueue {
-				atomic.AddInt32(&sentRequests, 1)
-				conn, err := createTCPConn("127.0.0.1:2002")
-				if err != nil {
-					log.Printf("Worker %d: Request %d failed to connect: %v", id, job.ID, err)
-					continue
-				}
 
-				reader := bufio.NewReader(conn)
+			conn, err := createTCPConn(localIP, "127.0.0.1:2002")
+			if err != nil {
+				log.Printf("[%s] Worker %d: failed to connect: %v", localIP, id, err)
+				return
+			}
+			defer conn.Close()
 
-				// to tcp
-				_, err = conn.Write([]byte("PING\n"))
-				if err != nil {
-					log.Printf("Worker %d: Request %d write error: %v", id, job.ID, err)
-					conn.Close()
-					continue
+			atomic.AddInt32(&openConnections, 1)
+			defer atomic.AddInt32(&openConnections, -1)
+
+			reader := bufio.NewReader(conn)
+			ticker := time.NewTicker(1 * time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-stopCh:
+					return
+				case <-ticker.C:
+					atomic.AddInt32(&sentRequests, 1)
+					_, err := conn.Write([]byte("PING\n"))
+					if err != nil {
+						log.Printf("[%s] Worker %d: write error: %v", localIP, id, err)
+						return
+					}
+					_, err = reader.ReadString('\n')
+					if err != nil {
+						log.Printf("[%s] Worker %d: read error: %v", localIP, id, err)
+						return
+					}
+					atomic.AddInt32(&completedRequests, 1)
 				}
-				_, err = reader.ReadString('\n')
-				if err != nil {
-					log.Printf("Worker %d: Request %d read error: %v", id, job.ID, err)
-					conn.Close()
-					continue
-				}
-				atomic.AddInt32(&completedRequests, 1)
-				conn.Close()
 			}
 		}(i)
 	}
@@ -83,37 +87,33 @@ func main() {
 		fmt.Println("Please provide a valid number of requests per second")
 		os.Exit(1)
 	}
+	localIPs := []string{"127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"}
+	numConnectionsPerIP := requestsPerSecond / len(localIPs)
+	const duration = 15 * time.Second
 
 	var wg sync.WaitGroup
-	go StartWorkerPool(64, &wg)
+	stopCh := make(chan struct{})
 
-	const duration = 15 * time.Second
+	for _, ip := range localIPs {
+		startPersistentConnections(ip, numConnectionsPerIP, &wg, stopCh)
+	}
+
+	start := time.Now()
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	start := time.Now()
 
-	go func() {
-		tickerCount := time.NewTicker(1 * time.Second)
-		defer tickerCount.Stop()
-		for range tickerCount.C {
-			sent := atomic.SwapInt32(&sentRequests, 0)
-			completed := atomic.SwapInt32(&completedRequests, 0)
-			log.Printf("=================================")
-			log.Printf("Requests sent in last 1 second: %d, Completed: %d", sent, completed)
-			if time.Since(start) >= duration {
-				break
-			}
-		}
-	}()
+	for range ticker.C {
+		open := atomic.LoadInt32(&openConnections)
+		sent := atomic.SwapInt32(&sentRequests, 0)
+		completed := atomic.SwapInt32(&completedRequests, 0)
+		log.Printf("Open connections: %d, Sent in last 1s: %d, Completed: %d", open, sent, completed)
 
-	for i := 0; time.Since(start) < duration; i++ {
-		<-ticker.C
-		for j := 0; j < requestsPerSecond; j++ {
-			JobQueue <- Job{ID: (i * requestsPerSecond) + j}
+		if time.Since(start) >= duration {
+			close(stopCh)
+			break
 		}
 	}
 
-	close(JobQueue)
 	wg.Wait()
-	fmt.Printf("Completed send requests")
+	log.Println("Test finished after 15 seconds.")
 }
