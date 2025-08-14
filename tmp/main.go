@@ -12,14 +12,14 @@ import (
 
 // pingCounter là bộ đếm an toàn để theo dõi số request PING nhận được
 var pingCounter int32
-var connectionCounter int32
+var (
+	PORT          = 2002
+	NUMBER_WORKER = 32
+)
 
 func handleConnection(c net.Conn) {
-	defer atomic.AddInt32(&connectionCounter, -1)
 	defer c.Close()
 	reader := bufio.NewReader(c)
-	//start := time.Now()
-	//const duration = 30 * time.Second
 	for {
 		netData, err := reader.ReadString('\n')
 		if err != nil {
@@ -41,9 +41,14 @@ func handleConnection(c net.Conn) {
 				return
 			}
 		}
-		//if time.Since(start) >= duration {
-		//return
-		//}
+	}
+}
+
+func startWorker(jobs <-chan net.Conn) {
+	for range NUMBER_WORKER {
+		for conn := range jobs {
+			go handleConnection(conn)
+		}
 	}
 }
 
@@ -55,53 +60,16 @@ func main() {
 	}
 	defer l.Close()
 
+	jobChan := make(chan net.Conn, 1000)
+	go startWorker(jobChan)
+
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
 			count := atomic.SwapInt32(&pingCounter, 0) // Lấy giá trị và reset
 			log.Printf("=================================")
-			log.Printf("PING requests received in last 1 second: %d, quality connection now %d", count, connectionCounter)
-		}
-	}()
-
-	go func() {
-		PORT := ":2003"
-		l_2003, err := net.Listen("tcp", PORT)
-		if err != nil {
-			log.Fatalf("Listen error: %v", err)
-		}
-		defer l_2003.Close()
-
-		log.Printf("Starting TCP server on :2003")
-		for {
-			c_2003, err := l_2003.Accept()
-			if err != nil {
-				log.Printf("Accept error: %v", err)
-				continue
-			}
-			atomic.AddInt32(&connectionCounter, 1)
-			go handleConnection(c_2003)
-		}
-	}()
-
-	go func() {
-		PORT := ":2004"
-		l_2003, err := net.Listen("tcp", PORT)
-		if err != nil {
-			log.Fatalf("Listen error: %v", err)
-		}
-		defer l_2003.Close()
-
-		log.Printf("Starting TCP server on :2003")
-		for {
-			c_2003, err := l_2003.Accept()
-			if err != nil {
-				log.Printf("Accept error: %v", err)
-				continue
-			}
-			atomic.AddInt32(&connectionCounter, 1)
-			go handleConnection(c_2003)
+			log.Printf("PING requests received in last 1 second: %d", count)
 		}
 	}()
 
@@ -112,7 +80,6 @@ func main() {
 			log.Printf("Accept error: %v", err)
 			continue
 		}
-		atomic.AddInt32(&connectionCounter, 1)
-		go handleConnection(c)
+		jobChan <- c
 	}
 }

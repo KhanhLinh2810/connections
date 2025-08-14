@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"log"
+	mathrand "math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -19,8 +20,8 @@ var sentRequests int32
 func createTCPConn(localIP, remoteAddr string) (net.Conn, error) {
 	localAddr, _ := net.ResolveTCPAddr("tcp", localIP+":0")
 	dialer := &net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
+		Timeout:   3 * time.Second,
+		KeepAlive: 3 * time.Second,
 		LocalAddr: localAddr,
 		// Control: func(network, address string, c syscall.RawConn) error {
 		// 	return c.Control(func(fd uintptr) {
@@ -40,12 +41,16 @@ func startPersistentConnections(localIP string, num int, wg *sync.WaitGroup, sto
 		go func(id int) {
 			defer wg.Done()
 
-			conn, err := createTCPConn(localIP, "127.0.0.1:2002")
+			port := mathrand.Intn(3) + 2002
+			address := "127.0.0.1:" + strconv.Itoa(port)
+
+			conn, err := createTCPConn(localIP, address)
 			if err != nil {
 				log.Printf("[%s] Worker %d: failed to connect: %v", localIP, id, err)
 				return
 			}
 			defer conn.Close()
+			// time.Sleep(15 * time.Second)
 
 			atomic.AddInt32(&openConnections, 1)
 			defer atomic.AddInt32(&openConnections, -1)
@@ -87,10 +92,10 @@ func main() {
 		fmt.Println("Please provide a valid number of requests per second")
 		os.Exit(1)
 	}
-	localIPs := []string{"127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"}
+	//localIPs := []string{"127.0.0.1", "127.0.0.2", "127.0.0.3", "127.0.0.4", "127.0.0.5", "127.0.0.6"}
+	localIPs := []string{"127.0.0.1"}
 	numConnectionsPerIP := requestsPerSecond / len(localIPs)
-	const duration = 15 * time.Second
-
+	const duration = 30 * time.Second
 	var wg sync.WaitGroup
 	stopCh := make(chan struct{})
 
